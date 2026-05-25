@@ -1,7 +1,8 @@
 {
   "stocks": [
-    {"name": "Sagarsoft India", "scrip": "540143", "nse_symbol": "SAGARSOFT"},
-    {"name": "Reliance Industries", "scrip": "500325", "nse_symbol": "RELIANCE"},
-    {"name": "Tata Consultancy Services", "scrip": "532540", "nse_symbol": "TCS"}
+    {"name": "Oil and Natural Gas Corporation", "scrip": "500312", "nse_symbol": "ONGC"},
+    {"name": "Siemens", "scrip": "500550", "nse_symbol": "SIEMENS"},
+    {"name": "AIA Engineering", "scrip": "532683", "nse_symbol": "AIAENG"},
+    {"name": "Black Box", "scrip": "500463", "nse_symbol": "BBOX"}
   ]
 }
