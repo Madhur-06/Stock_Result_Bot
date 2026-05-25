@@ -1,0 +1,10 @@
+{
+  "Reliance Industries": {
+    "quarter": "Q2 FY26",
+    "revenue_cr": 245000,
+    "ebitda_cr": 42500,
+    "pat_cr": 17200,
+    "eps": 25.4,
+    "notes": "Optional analyst commentary"
+  }
+}

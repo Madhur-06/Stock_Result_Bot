@@ -1,0 +1,28 @@
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# Logs
+logs/
+*.log
+
+# Local state
+data/seen_filings.json
+data/pdfs/
+data/tmp/
+**/*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,7 @@
+{
+  "stocks": [
+    {"name": "Sagarsoft India", "scrip": "540143", "nse_symbol": "SAGARSOFT"},
+    {"name": "Reliance Industries", "scrip": "500325", "nse_symbol": "RELIANCE"},
+    {"name": "Tata Consultancy Services", "scrip": "532540", "nse_symbol": "TCS"}
+  ]
+}
