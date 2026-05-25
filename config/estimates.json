@@ -1,10 +1,34 @@
 {
-  "Reliance Industries": {
-    "quarter": "Q2 FY26",
-    "revenue_cr": 245000,
-    "ebitda_cr": 42500,
-    "pat_cr": 17200,
-    "eps": 25.4,
-    "notes": "Optional analyst commentary"
+  "Oil and Natural Gas Corporation": {
+    "quarter": "Q4 FY26",
+    "revenue_cr": 36097,
+    "ebitda_cr": 19511,
+    "pat_cr": 8230,
+    "eps": 6.5,
+    "notes": "Consolidated consensus: Revenue +14.4% QoQ vs Rs 31,546 cr in Q3FY26; EBITDA +12.6% QoQ (margin ~54.1%, slightly softer than 54.9%); PAT -1.7% QoQ vs Rs 8,372 cr. Standalone PAT range tracked separately at Rs 9,500-10,500 cr; watch for windfall-tax adjustments, exploration write-offs, and the final FY26 dividend. Crude realisations and gas APM price the key swing factors."
+  },
+  "Siemens": {
+    "quarter": "Q1 FY27 (Apr-Jun 2026)",
+    "revenue_cr": 4300,
+    "ebitda_cr": 600,
+    "pat_cr": 360,
+    "eps": 10.1,
+    "notes": "PLACEHOLDER — Siemens India already filed Q4 FY26 on 29 Apr 2026 (mid-cycle fiscal-year change from Oct-Sep to Apr-Mar). Next filing expected late-Jul/Aug 2026 for Q1 FY27. Numbers extrapolated from Q4 FY26 analyst projections (Rev Rs 4,200-4,500 cr, PAT Rs 340-390 cr). Refresh before the actual Q1 FY27 board meeting."
+  },
+  "AIA Engineering": {
+    "quarter": "Q4 FY26",
+    "revenue_cr": 1289,
+    "ebitda_cr": 454,
+    "pat_cr": 326,
+    "eps": 34.5,
+    "notes": "Derived: Q4 FY25 base was Revenue Rs 1,141 cr, EBITDA Rs 400 cr, PAT Rs 285 cr. Street guidance +11-15% YoY revenue, +11-16% EBITDA, +12-17% PAT — midpoints applied. Watch grinding-media volumes (cement/mining/thermal demand) and ferrochrome cost pass-through; final FY26 dividend to be recommended at same meeting."
+  },
+  "Black Box": {
+    "quarter": "Q4 FY26",
+    "revenue_cr": 2244,
+    "ebitda_cr": 210,
+    "pat_cr": 75,
+    "eps": 4.5,
+    "notes": "Derived (no formal consensus published): FY26 management guidance Rs 6,750-7,000 cr revenue minus 9M FY26 actuals (Revenue Rs 4,631 cr, EBITDA Rs 406 cr) implies Q4 revenue ~Rs 2,120-2,370 cr. Q3 FY26 PAT was only Rs 50 cr after company cut FY26 forecast on supply-chain delays; Q4 typically back-end loaded so a recovery is expected. Also watch fund-raising approval and the Brazil 2S Inovacoes acquisition commentary."
   }
 }
