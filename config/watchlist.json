@@ -1,7 +1,7 @@
 {
   "stocks": [
     {"name": "Oil and Natural Gas Corporation", "scrip": "500312", "nse_symbol": "ONGC"},
-    {"name": "Siemens", "scrip": "500550", "nse_symbol": "SIEMENS"},
+    {"name": "Siemens Ltd", "scrip": "500550", "nse_symbol": "SIEMENS"},
     {"name": "AIA Engineering", "scrip": "532683", "nse_symbol": "AIAENG"},
     {"name": "Black Box", "scrip": "500463", "nse_symbol": "BBOX"}
   ]
