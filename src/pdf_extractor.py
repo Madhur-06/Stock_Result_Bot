@@ -1,4 +1,16 @@
-"""Extract text from BSE-result PDFs using pdfplumber."""
+"""Extract text from BSE-result PDFs, ranking pages and returning the top N.
+
+For a typical BSE filing, the headline P&L table is rarely on page 1: cover
+letters, board-meeting intimations and auditor reports come first. We extract
+text per page, score each page by (a) P&L-statement keywords + numeric density
+and (b) penalty for cover-letter / auditor / board-notice phrasing, then return
+the concatenated text of the top N pages — separated with `=== Page N ===`
+markers so the LLM sees them as discrete pages.
+
+Fallback: if every page scores <=0 (typical for scanned image-only PDFs where
+text extraction returns empty), return the first N pages so the pipeline can
+still try.
+"""
 from __future__ import annotations
 
 import logging
@@ -11,10 +23,91 @@ from pdfplumber.utils.exceptions import PdfminerException
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_PAGES = 5
+DEFAULT_TOP_N = 2
+MAX_NEG_PENALTY = 18   # cap so one stray match can't disqualify a true P&L page
+MAX_NUM_BONUS = 12     # at ~48 numeric tokens; real P&Ls easily exceed this
+
 _WS_RE = re.compile(r"[ \t]+")
 _BLANK_LINES_RE = re.compile(r"\n{3,}")
 
+
+# ---------- Scoring patterns ----------
+
+_POSITIVE_PATTERNS: list[tuple[re.Pattern[str], int]] = [
+    # The statement title is the single strongest signal.
+    (re.compile(r"statement\s+of\s+(?:standalone|consolidated|unaudited|audited)?\s*"
+                r"(?:financial\s+)?results?", re.I), 6),
+    # Period header — repeats across column headers in a results table.
+    (re.compile(r"\bquarter\s+(?:and\s+(?:year|half[- ]?year)\s+)?ended\b", re.I), 3),
+    # Quarter-end dates: 31.03.YYYY (Mar), 30.06 (Jun), 30.09 (Sep), 31.12 (Dec).
+    (re.compile(r"\b(?:31[./-]03|30[./-]06|30[./-]09|31[./-]12)[./-](?:20)?\d{2}\b"), 2),
+    # Core P&L line items.
+    (re.compile(r"revenue\s+from\s+operations", re.I), 3),
+    (re.compile(r"\btotal\s+income\b", re.I), 2),
+    (re.compile(r"\btotal\s+expenses?\b", re.I), 2),
+    (re.compile(r"profit\s*(?:/\s*\(?loss\)?)?\s+(?:before|after|for\s+the\s+(?:period|quarter|year))",
+                re.I), 2),
+    (re.compile(r"\bfinance\s+costs?\b", re.I), 2),
+    (re.compile(r"depreciation(?:\s*,?\s+(?:amortisation|amortization))?"
+                r"(?:\s+(?:and|&)\s+(?:impairment|amortisation|amortization))?\s*expenses?",
+                re.I), 2),
+    (re.compile(r"\btax\s+expenses?\b", re.I), 2),
+    (re.compile(r"earnings?\s+per\s+(?:equity\s+)?share", re.I), 3),
+    (re.compile(r"\bother\s+(?:income|comprehensive\s+income)\b", re.I), 1),
+    (re.compile(r"\bexceptional\s+items?\b", re.I), 1),
+    (re.compile(r"cost\s+of\s+materials?\s+consumed", re.I), 1),
+    (re.compile(r"employee\s+benefits?\s+expenses?", re.I), 1),
+    # Currency-unit declaration above results tables.
+    (re.compile(r"\(\s*(?:rs\.?|inr|₹)\s*in\s+(?:lakhs?|crores?|millions?)\s*\)", re.I), 3),
+    (re.compile(r"(?:rs\.?|inr|₹)\s*(?:in\s+)?(?:lakhs?|crores?|millions?)\b", re.I), 1),
+    # Audit qualifier in P&L column headers ("Unaudited" / "Audited").
+    (re.compile(r"\b(?:un)?audited\b", re.I), 1),
+]
+
+_NEGATIVE_PATTERNS: list[tuple[re.Pattern[str], int]] = [
+    # Cover-letter / submission language.
+    (re.compile(r"\b(?:dear|to,?)\s+(?:sir|madam|sirs)\b", re.I), 6),
+    (re.compile(r"please\s+find\s+(?:enclosed|attached)", re.I), 6),
+    (re.compile(r"yours\s+(?:faithfully|sincerely|truly)", re.I), 6),
+    # Stock-exchange submission addresses.
+    (re.compile(r"bse\s+limited[\s,]+(?:p\.?\s*j\.|phiroze|dalal)", re.I), 5),
+    (re.compile(r"national\s+stock\s+exchange\s+of\s+india", re.I), 5),
+    (re.compile(r"listing\s+(?:department|compliance|regulations?)", re.I), 3),
+    # Auditor report.
+    (re.compile(r"independent\s+auditor[''']?s?\s+(?:report|review\s+report)", re.I), 10),
+    (re.compile(r"we\s+have\s+(?:audited|reviewed)\s+the\s+accompanying", re.I), 6),
+    (re.compile(r"\bin\s+our\s+opinion\b", re.I), 4),
+    (re.compile(r"basis\s+for\s+(?:qualified\s+)?opinion", re.I), 6),
+    (re.compile(r"chartered\s+accountants?", re.I), 2),
+    (re.compile(r"firm\s+(?:registration|reg\.?)\s+(?:no\.|number)", re.I), 3),
+    # Board / dividend intimations.
+    (re.compile(r"(?:outcome|intimation)\s+of\s+(?:the\s+)?board\s+meeting", re.I), 6),
+    # Notes / MD&A.
+    (re.compile(r"notes\s+to\s+the\s+(?:financial\s+)?(?:results|statements)", re.I), 5),
+    (re.compile(r"management\s+discussion\s+and\s+analysis", re.I), 8),
+]
+
+# Number-like tokens: thousand-separated, Indian lakh notation, plain 4+ digit ints,
+# decimals, and parenthesised negatives.
+_NUMERIC_RE = re.compile(
+    r"\b\d{1,3}(?:,\d{2,3})+(?:\.\d+)?\b"   # 12,345 / 1,23,456 / 12,345.67
+    r"|\b\d{4,}(?:\.\d+)?\b"                 # 45000 / 45000.50
+    r"|\(\d[\d,]*(?:\.\d+)?\)"               # (1,234) negative
+)
+
+
+def _score_page(text: str) -> tuple[int, int, int, int]:
+    """Return (positive, negative_capped, numeric_bonus, total)."""
+    if not text:
+        return 0, 0, 0, 0
+    pos = sum(w * len(p.findall(text)) for p, w in _POSITIVE_PATTERNS)
+    neg = sum(w * len(p.findall(text)) for p, w in _NEGATIVE_PATTERNS)
+    neg_capped = min(neg, MAX_NEG_PENALTY)
+    num_bonus = min(len(_NUMERIC_RE.findall(text)) // 4, MAX_NUM_BONUS)
+    return pos, neg_capped, num_bonus, pos - neg_capped + num_bonus
+
+
+# ---------- Cleaning ----------
 
 def _clean(text: str) -> str:
     """Collapse runs of whitespace and excess blank lines."""
@@ -25,35 +118,71 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
-def extract_text(pdf_path: Path, max_pages: int = DEFAULT_MAX_PAGES) -> str:
-    """Return cleaned text from the first max_pages of a PDF. Empty on failure."""
+# ---------- Public entry point ----------
+
+def extract_text(pdf_path: Path, top_n: int = DEFAULT_TOP_N) -> str:
+    """Score every page, return the cleaned text of the top N pages with markers.
+
+    Pages are concatenated in document order with a `=== Page N ===` separator
+    so the LLM can tell them apart. Empty string on failure to open the PDF.
+    """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
         logger.warning("PDF not found: %s", pdf_path)
         return ""
-    chunks: list[str] = []
+
     try:
         with pdfplumber.open(pdf_path) as pdf:
             page_count = len(pdf.pages)
-            for idx, page in enumerate(pdf.pages[:max_pages]):
+            page_texts: list[str] = []
+            breakdowns: list[tuple[int, int, int, int]] = []
+            for idx, page in enumerate(pdf.pages):
                 try:
                     txt = page.extract_text() or ""
                 except (ValueError, AttributeError) as exc:
-                    logger.warning("Page %d extract failed in %s: %s", idx + 1, pdf_path.name, exc)
+                    logger.warning("Page %d extract failed in %s: %s",
+                                   idx + 1, pdf_path.name, exc)
                     txt = ""
-                if txt:
-                    chunks.append(txt)
-            logger.info("Extracted %d/%d pages from %s", min(max_pages, page_count),
-                        page_count, pdf_path.name)
+                page_texts.append(txt)
+                breakdowns.append(_score_page(txt))
     except (OSError, ValueError, PdfminerException) as exc:
-        logger.warning("Failed to open PDF %s: %s (likely non-PDF response or scanned image)",
+        logger.warning("Failed to open PDF %s: %s (likely non-PDF or scanned image)",
                        pdf_path, exc)
         return ""
 
-    cleaned = _clean("\n\n".join(chunks))
-    if not cleaned:
-        logger.warning("Empty text from %s — possibly scanned/image-only PDF", pdf_path.name)
-    return cleaned
+    scores = [b[3] for b in breakdowns]
+
+    if all(s <= 0 for s in scores):
+        chosen = list(range(min(top_n, page_count)))
+        logger.warning(
+            "All pages scored <=0 in %s — likely scanned PDF or empty extraction. "
+            "Falling back to first %d pages (1-based: %s)",
+            pdf_path.name, len(chosen), [i + 1 for i in chosen],
+        )
+    else:
+        # Sort indices by (-score, index): higher score wins; ties keep doc order.
+        ranked = sorted(range(page_count), key=lambda i: (-scores[i], i))
+        chosen = sorted(ranked[:top_n])
+        logger.info(
+            "Scores=%s for %s — selected top %d (1-based pages: %s)",
+            scores, pdf_path.name, top_n, [i + 1 for i in chosen],
+        )
+
+    chunks: list[str] = []
+    for i in chosen:
+        page_body = _clean(page_texts[i])
+        if not page_body:
+            continue
+        chunks.append(f"=== Page {i + 1} ===\n{page_body}")
+
+    out = "\n\n".join(chunks).strip()
+    if not out:
+        logger.warning("Empty text from top %d pages of %s — possibly scanned PDF",
+                       len(chosen), pdf_path.name)
+    else:
+        logger.info("Returning %d chars from %d pages of %s",
+                    len(out), len(chunks), pdf_path.name)
+    return out
 
 
 if __name__ == "__main__":
@@ -61,6 +190,25 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python -m src.pdf_extractor <path-to-pdf>")
         sys.exit(1)
-    out = extract_text(Path(sys.argv[1]))
-    print(f"--- extracted {len(out)} chars ---")
+    pdf_path = Path(sys.argv[1])
+    if not pdf_path.exists():
+        print(f"Not found: {pdf_path}")
+        sys.exit(1)
+
+    # Per-page score breakdown for debugging.
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            print(f"\n--- Score breakdown for {pdf_path.name} ({len(pdf.pages)} pages) ---")
+            print(f"{'page':>4} {'pos':>5} {'neg':>5} {'num':>5} {'total':>6}")
+            for idx, page in enumerate(pdf.pages):
+                txt = page.extract_text() or ""
+                pos, neg, num, total = _score_page(txt)
+                print(f"{idx + 1:>4} {pos:>5} -{neg:>4} +{num:>4} {total:>6}")
+    except (OSError, ValueError, PdfminerException) as exc:
+        print(f"Failed to open PDF: {exc}")
+        sys.exit(1)
+
+    print()
+    out = extract_text(pdf_path)
+    print(f"--- selected text ({len(out)} chars) ---")
     print(out[:2000])
