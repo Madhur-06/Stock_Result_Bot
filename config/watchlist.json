@@ -1,9 +1,15 @@
 {
   "stocks": [
-    {"name": "Cummins India Ltd", "scrip": "500480", "nse_symbol": "CUMMINSIND"},
-    {"name": "GMR Airports Ltd", "scrip": "532754", "nse_symbol": "GMRAIRPORT"},
-    {"name": "PG Electroplast Ltd", "scrip": "533581", "nse_symbol": "PGEL"},
-    {"name": "Elgi Equipments Ltd", "scrip": "522074", "nse_symbol": "ELGIEQUIP"},
-    {"name": "Gillette India Ltd", "scrip": "507815", "nse_symbol": "GILLETTE"}
+    {"name": "InterGlobe Aviation Ltd (IndiGo)", "scrip": "539448", "nse_symbol": "INDIGO"},
+    {"name": "Asian Paints Ltd", "scrip": "500820", "nse_symbol": "ASIANPAINT"},
+    {"name": "NMDC Ltd", "scrip": "526371", "nse_symbol": "NMDC"},
+    {"name": "Glenmark Pharmaceuticals Ltd", "scrip": "532296", "nse_symbol": "GLENMARK"},
+    {"name": "Indian Renewable Energy Development Agency Ltd (IREDA)", "scrip": "544026", "nse_symbol": "IREDA"},
+    {"name": "Inox Wind Ltd", "scrip": "539083", "nse_symbol": "INOXWIND"},
+    {"name": "BEML Ltd", "scrip": "500048", "nse_symbol": "BEML"},
+    {"name": "Ipca Laboratories Ltd", "scrip": "524494", "nse_symbol": "IPCALAB"},
+    {"name": "Natco Pharma Ltd", "scrip": "524816", "nse_symbol": "NATCOPHARM"},
+    {"name": "Ingersoll Rand (India) Ltd", "scrip": "500210", "nse_symbol": "INGERRAND"},
+    {"name": "JM Financial Ltd", "scrip": "523405", "nse_symbol": "JMFINANCIL"}
   ]
 }

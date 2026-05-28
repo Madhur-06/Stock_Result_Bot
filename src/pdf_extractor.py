@@ -23,7 +23,7 @@ from pdfplumber.utils.exceptions import PdfminerException
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TOP_N = 2
+DEFAULT_TOP_N = 3
 MAX_NEG_PENALTY = 18   # cap so one stray match can't disqualify a true P&L page
 MAX_NUM_BONUS = 12     # at ~48 numeric tokens; real P&Ls easily exceed this
 
@@ -118,13 +118,97 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
+# ---------- Structured-table rendering ----------
+#
+# page.extract_text() flattens a results table into a single space-separated
+# line, destroying the column boundaries the LLM needs to align each number
+# with its 'Quarter Ended' period. page.extract_tables() keeps the row/column
+# grid, which we render as a pipe-delimited block so columns survive.
+#
+# Cost note: this runs ONLY on the already-selected top-N pages (reusing pages
+# pdfplumber has already opened), never on the whole document — so it adds a
+# fraction of a second, not a second full extraction pass.
+
+# Two detection strategies. "lines" works when the table has ruled borders;
+# "text" clusters on character x/y positions and is what actually separates the
+# period columns on borderless BSE result tables (where "lines" collapses all
+# line items into a few mega-rows). We render both and keep whichever genuinely
+# splits the numbers into columns — see _column_quality.
+_TEXT_TABLE_SETTINGS = {
+    "vertical_strategy": "text",
+    "horizontal_strategy": "text",
+    "snap_tolerance": 4,
+}
+
+# A cell that is purely a number: 2,963.20 / 11,949.73 / (126.54) / -50.05
+_NUM_CELL_RE = re.compile(r"^\(?-?[\d,]+(?:\.\d+)?\)?$")
+
+
+def _render_one(tables) -> tuple[str, int]:
+    """Render a strategy's tables to text; return (text, column_quality)."""
+    rendered: list[str] = []
+    quality = 0
+    for tbl in tables or []:
+        rows: list[str] = []
+        for row in tbl:
+            cells = [_WS_RE.sub(" ", (c or "").replace("\n", " ")).strip() for c in row]
+            if not any(cells):  # skip fully blank rows
+                continue
+            rows.append(" | ".join(cells))
+            # A well-separated results row has its period values in distinct
+            # cells; count rows with >=3 pure-number cells as the quality signal.
+            if sum(1 for c in cells if _NUM_CELL_RE.match(c)) >= 3:
+                quality += 1
+        # A real results table has a header plus several line items; skip stray
+        # 1-row "tables" that table detection sometimes hallucinates.
+        if len(rows) >= 2:
+            rendered.append("\n".join(rows))
+    return "\n\n".join(rendered), quality
+
+
+def _render_tables(page) -> str:
+    """Return the page's best-separated tables as pipe-delimited rows, or ''."""
+    try:
+        lines_text, lines_q = _render_one(page.extract_tables())
+        text_text, text_q = _render_one(page.extract_tables(_TEXT_TABLE_SETTINGS))
+    except Exception as exc:  # noqa: BLE001 — table detection can throw on odd geometry
+        logger.warning("Table extraction failed on a page: %s", exc)
+        return ""
+    # Prefer whichever strategy actually split numbers into columns. On a tie
+    # (or when neither separates numbers) keep the ruled-line rendering.
+    return text_text if text_q > lines_q else lines_text
+
+
 # ---------- Public entry point ----------
 
-def extract_text(pdf_path: Path, top_n: int = DEFAULT_TOP_N) -> str:
-    """Score every page, return the cleaned text of the top N pages with markers.
+def _select_pages(scores: list[int], page_count: int, top_n: int, name: str) -> list[int]:
+    """Pick the top-N page indices to keep (doc order), with scanned-PDF fallback."""
+    if all(s <= 0 for s in scores):
+        chosen = list(range(min(top_n, page_count)))
+        logger.warning(
+            "All pages scored <=0 in %s — likely scanned PDF or empty extraction. "
+            "Falling back to first %d pages (1-based: %s)",
+            name, len(chosen), [i + 1 for i in chosen],
+        )
+        return chosen
+    # Sort indices by (-score, index): higher score wins; ties keep doc order.
+    ranked = sorted(range(page_count), key=lambda i: (-scores[i], i))
+    chosen = sorted(ranked[:top_n])
+    logger.info(
+        "Scores=%s for %s — selected top %d (1-based pages: %s)",
+        scores, name, top_n, [i + 1 for i in chosen],
+    )
+    return chosen
 
-    Pages are concatenated in document order with a `=== Page N ===` separator
-    so the LLM can tell them apart. Empty string on failure to open the PDF.
+
+def extract_text(pdf_path: Path, top_n: int = DEFAULT_TOP_N) -> str:
+    """Score every page, return the top N pages with both structured tables and text.
+
+    Each selected page is emitted under a `=== Page N ===` marker. When a results
+    table is detected on the page it is rendered as a pipe-delimited `[TABLE]`
+    block (columns preserved); the flattened `[TEXT]` of the page follows for
+    context (date headers, units line, notes). Tables are extracted only for the
+    chosen pages, so the extra cost is negligible. Empty string on open failure.
     """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
@@ -135,7 +219,6 @@ def extract_text(pdf_path: Path, top_n: int = DEFAULT_TOP_N) -> str:
         with pdfplumber.open(pdf_path) as pdf:
             page_count = len(pdf.pages)
             page_texts: list[str] = []
-            breakdowns: list[tuple[int, int, int, int]] = []
             for idx, page in enumerate(pdf.pages):
                 try:
                     txt = page.extract_text() or ""
@@ -144,44 +227,37 @@ def extract_text(pdf_path: Path, top_n: int = DEFAULT_TOP_N) -> str:
                                    idx + 1, pdf_path.name, exc)
                     txt = ""
                 page_texts.append(txt)
-                breakdowns.append(_score_page(txt))
+
+            scores = [_score_page(t)[3] for t in page_texts]
+            chosen = _select_pages(scores, page_count, top_n, pdf_path.name)
+
+            # Render tables only for the winning pages (cheap; pages already open).
+            chunks: list[str] = []
+            tables_found = 0
+            for i in chosen:
+                page_body = _clean(page_texts[i])
+                table_block = _render_tables(pdf.pages[i])
+                if not page_body and not table_block:
+                    continue
+                parts = [f"=== Page {i + 1} ==="]
+                if table_block:
+                    tables_found += 1
+                    parts.append("[TABLE]\n" + table_block)
+                if page_body:
+                    parts.append("[TEXT]\n" + page_body)
+                chunks.append("\n".join(parts))
     except (OSError, ValueError, PdfminerException) as exc:
         logger.warning("Failed to open PDF %s: %s (likely non-PDF or scanned image)",
                        pdf_path, exc)
         return ""
-
-    scores = [b[3] for b in breakdowns]
-
-    if all(s <= 0 for s in scores):
-        chosen = list(range(min(top_n, page_count)))
-        logger.warning(
-            "All pages scored <=0 in %s — likely scanned PDF or empty extraction. "
-            "Falling back to first %d pages (1-based: %s)",
-            pdf_path.name, len(chosen), [i + 1 for i in chosen],
-        )
-    else:
-        # Sort indices by (-score, index): higher score wins; ties keep doc order.
-        ranked = sorted(range(page_count), key=lambda i: (-scores[i], i))
-        chosen = sorted(ranked[:top_n])
-        logger.info(
-            "Scores=%s for %s — selected top %d (1-based pages: %s)",
-            scores, pdf_path.name, top_n, [i + 1 for i in chosen],
-        )
-
-    chunks: list[str] = []
-    for i in chosen:
-        page_body = _clean(page_texts[i])
-        if not page_body:
-            continue
-        chunks.append(f"=== Page {i + 1} ===\n{page_body}")
 
     out = "\n\n".join(chunks).strip()
     if not out:
         logger.warning("Empty text from top %d pages of %s — possibly scanned PDF",
                        len(chosen), pdf_path.name)
     else:
-        logger.info("Returning %d chars from %d pages of %s",
-                    len(out), len(chunks), pdf_path.name)
+        logger.info("Returning %d chars from %d pages of %s (%d with structured tables)",
+                    len(out), len(chunks), pdf_path.name, tables_found)
     return out
 
 
