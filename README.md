@@ -1,16 +1,95 @@
-# BSE Quarterly Results AI Comparison Bot
+# BSE / NSE Quarterly-Results Alert Bot
 
-A small Python automation that watches BSE (Bombay Stock Exchange) for quarterly
-result filings from a custom stock watchlist, uses OpenAI to compare the filed
-numbers against your stored expectations, and pushes a concise verdict
-(BEAT / MISS / IN-LINE) to your personal Telegram via the free Bot API.
-Personal-use, laptop-cron grade — no databases, no Docker, no web service.
+A lightweight Python automation that monitors the **Bombay Stock Exchange (BSE)**
+and **National Stock Exchange (NSE)** for quarterly-results filings from a custom
+watchlist, extracts the reported figures from the filed PDF, uses **OpenAI** to
+compare them against your stored expectations, and delivers a concise verdict
+(**STRONG / WEAK / MIXED**, with an optional **BEAT / MISS / IN-LINE** call
+against estimates) to your personal **Telegram**.
 
-## Setup
+Designed for personal, single-user operation — no database, no containers, no web
+service. State lives in local JSON files and the process runs from a laptop, a
+cron entry, or a small VM.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Configuration](#configuration)
+  - [Environment variables](#environment-variables)
+  - [Watchlist](#watchlist-configwatchlistjson)
+  - [Estimates](#estimates-configestimatesjson)
+  - [Poller settings](#poller-settings-configpollerjson)
+- [Usage](#usage)
+  - [One-shot scan](#one-shot-scan)
+  - [Live poll mode](#live-poll-mode)
+  - [Module smoke tests](#module-smoke-tests)
+- [How it works](#how-it-works)
+- [Deployment](#deployment)
+- [Troubleshooting](#troubleshooting)
+- [Project structure](#project-structure)
+- [Design notes & limitations](#design-notes--limitations)
+
+---
+
+## Features
+
+- **Dual-exchange coverage** — watches BSE and NSE concurrently; a company that
+  files to both exchanges produces exactly one report.
+- **Low latency** — the live poller delivers a report within seconds of an
+  exchange disseminating a result. Detection is decoupled from processing, so a
+  slow OpenAI call never delays spotting the next filing.
+- **Automatic results-day detection** — reads SEBI Reg. 29 board-meeting
+  intimations and tightens the polling cadence for any stock holding a results
+  meeting that day. No manual scheduling required.
+- **AI-generated digest** — an equity-research-style summary of revenue, EBITDA
+  (with margin), PAT, and EPS, including YoY / QoQ deltas and vs-estimate calls.
+- **Source PDF attached** — the original filing is forwarded alongside the digest.
+- **Resilient by design** — per-stock error isolation, exponential backoff with
+  automatic cookie re-warming on anti-bot gates, and restart-safe deduplication.
+
+---
+
+## Architecture
+
+The live poller separates fast detection from slow processing:
+
+```
+ BSE poll thread ┐                                    ┌─ worker thread(s)
+                 ├─ detect → download PDF ──→ Queue ──→ extract → OpenAI → Telegram
+ NSE poll thread ┘   (fast path, per exchange)          (slow path, off the loop)
+```
+
+- **Producer threads** (`ExchangePoller`, one per exchange) poll the watchlist,
+  identify new results rows, download the PDF, and enqueue a job.
+- **Consumer threads** (`Worker`) drain the queue: extract text, call OpenAI, and
+  send the Telegram report.
+- **Hot-set refresher** (`HotSetRefresher`) recomputes the results-day watchlist
+  on startup and once per day.
+
+Because the producer only performs the fast download before handing off, a
+multi-second AI call on one filing cannot stall detection of the next.
+
+---
+
+## Requirements
+
+- Python **3.12+** (uses `zoneinfo`; `tzdata` is bundled for Windows)
+- An **OpenAI API key**
+- A **Telegram bot token** and **chat ID**
+
+---
+
+## Installation
 
 ```bash
-git clone <this repo>
+git clone <repository-url>
 cd bse-bot
+
 python -m venv venv
 # Windows
 venv\Scripts\activate
@@ -19,41 +98,72 @@ source venv/bin/activate
 
 pip install -r requirements.txt
 
-cp .env.example .env   # then edit .env and fill in the three values
+cp .env.example .env   # then edit .env with your credentials
 ```
 
-Edit `config/watchlist.json` to list the stocks you want to track. Each entry
-needs at minimum a `name` and a `scrip` (BSE 6-digit code). `nse_symbol` is
-informational.
+---
 
-## Getting a BSE scrip code
+## Configuration
 
-1. Go to <https://www.bseindia.com/> and search for the company.
-2. Open its page; the URL contains a 6-digit number, e.g.
-   `/stock-share-price/.../500325/` → scrip code is `500325` (Reliance).
-3. Add it to `config/watchlist.json`.
+### Environment variables
 
-## Getting a Telegram bot token + chat id
+Copy `.env.example` to `.env` and populate the three values (no quotes, no
+trailing spaces):
 
-1. In Telegram, search for **@BotFather** and start a chat.
-2. Send `/newbot`. Pick a display name and a unique username ending in `bot`.
-   BotFather replies with an HTTP token like `123456789:ABCdef...`. Put that
-   in `TELEGRAM_TOKEN` in `.env`.
-3. Search for the bot you just created and send it any message (e.g. `/start`)
-   so it has a chat with you.
-4. Open this URL in a browser, replacing `<TOKEN>` with your bot token:
-   `https://api.telegram.org/bot<TOKEN>/getUpdates`
-5. Find `"chat":{"id":NNNNN, ...}` in the JSON response. That number is your
-   chat id — put it in `TELEGRAM_CHAT_ID` in `.env`.
+```dotenv
+OPENAI_API_KEY=sk-...
+TELEGRAM_TOKEN=123456789:ABCdef...
+TELEGRAM_CHAT_ID=123456789
+```
 
-You will receive every report as a normal Telegram message on the device
-where you signed into the bot's chat.
+**Obtaining a Telegram token and chat ID**
 
-## Maintaining estimates.json
+1. In Telegram, open a chat with **@BotFather** and send `/newbot`. Follow the
+   prompts to receive an HTTP token — set it as `TELEGRAM_TOKEN`.
+2. Open a chat with your new bot and send it any message (e.g. `/start`).
+3. Visit `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser.
+4. Locate `"chat":{"id":<NNNNN>,...}` in the JSON — that number is your
+   `TELEGRAM_CHAT_ID`.
 
-Before a stock's expected result date, add or update its entry in
-`config/estimates.json`. The key must exactly match the `name` field in
-`watchlist.json`. Example:
+### Watchlist (`config/watchlist.json`)
+
+Each entry requires a `name` and at least one exchange identifier. `scrip` is the
+BSE 6-digit code; `nse_symbol` is the NSE trading symbol.
+
+```json
+{
+  "stocks": [
+    {
+      "name": "Reliance Industries",
+      "scrip": "500325",
+      "nse_symbol": "RELIANCE"
+    }
+  ]
+}
+```
+
+**Finding a BSE scrip code:** open the company page on
+[bseindia.com](https://www.bseindia.com/); the URL contains a 6-digit number,
+e.g. `.../500325/` → scrip code `500325`.
+
+**Manual results-day override** — force a stock into tight-polling for a specific
+date (useful for BSE-only stocks the auto-hot detector cannot see, since it keys
+off the NSE board-meeting feed):
+
+```json
+{
+  "name": "NMDC Ltd",
+  "scrip": "526371",
+  "nse_symbol": "NMDC",
+  "expected_results_date": "2026-07-15"
+}
+```
+
+### Estimates (`config/estimates.json`)
+
+Optional. Keyed by the exact `name` from the watchlist. When present, the digest
+includes vs-estimate deltas and a BEAT/MISS/IN-LINE call; when absent, the bot
+produces an actuals-only summary.
 
 ```json
 {
@@ -68,114 +178,176 @@ Before a stock's expected result date, add or update its entry in
 }
 ```
 
-If a stock has no estimates entry, the bot still produces an actuals-only
-summary instead of a vs.-estimate comparison.
+### Poller settings (`config/poller.json`)
 
-## Running
+| Key | Default | Description |
+|-----|---------|-------------|
+| `timezone` | `Asia/Kolkata` | IANA timezone for market hours and freshness checks. |
+| `market_open` / `market_close` | `09:00` / `16:30` | Active polling window. |
+| `weekdays_only` | `true` | Skip Saturdays and Sundays. |
+| `baseline_interval_sec` | `10.0` | Poll cadence for normal stocks. |
+| `tight_interval_sec` | `2.5` | Poll cadence for results-day ("hot") stocks. |
+| `off_hours_check_sec` | `60.0` | Idle re-check interval outside market hours. |
+| `worker_threads` | `1` | Number of processing workers. |
+| `enable_bse` / `enable_nse` | `true` | Per-exchange enable flags. |
+| `auto_hot` | `true` | Auto-detect results-day stocks via NSE board meetings. |
+| `hot_refresh_check_sec` | `300.0` | How often the hot-set refresher re-evaluates the day. |
+| `max_filing_age_min` | `0` | Freshness gate: `0` = today only; `N` = last `N` minutes. |
 
-Standalone smoke tests for each module:
+Most keys can be overridden per-run via CLI flags (see below).
+
+---
+
+## Usage
+
+### One-shot scan
+
+A single sweep over the watchlist, then exit — intended for cron.
 
 ```bash
-python -m src.bse_client       # fetches recent announcements for Reliance
-python -m src.pdf_extractor data/pdfs/<file>.pdf
-python -m src.telegram_sender  # sends "Bot test message"
-python -m src.ai_comparator    # runs the prompt with hard-coded sample data
+python -m src.main                 # run and send reports
+python -m src.main --dry-run       # print reports instead of sending
+python -m src.main --days-back 14  # widen the BSE lookback window
 ```
 
-Full pipeline (one-shot — one sweep then exit, for cron):
+### Live poll mode
 
-```bash
-python -m src.main --dry-run            # print reports instead of sending
-python -m src.main                      # the real thing
-python -m src.main --days-back 14       # widen the lookback window
-```
-
-## Live poll mode (BSE + NSE, low-latency)
-
-Instead of a periodic cron sweep, run the long-lived **dual poller**. It watches
-BSE and NSE concurrently and delivers the report within ~10–15s of an exchange
-disseminating a result. Detection and processing are decoupled (a slow OpenAI
-call never delays spotting the next filing), and a company that files to *both*
-exchanges triggers exactly one report.
+A long-running process that watches both exchanges continuously.
 
 ```bash
 python -m src.main --poll                       # via main.py
-python -m src.poller                            # or directly
+python -m src.poller                            # or run the poller directly
 python -m src.poller --dry-run                  # print instead of sending
 python -m src.poller --dry-run --ignore-market-hours   # poll off-hours (testing)
 python -m src.poller --no-nse                   # BSE only
 ```
 
-Behaviour is configured by `config/poller.json` (timezone, market hours,
-`baseline_interval_sec` ≈ 10s, `tight_interval_sec` ≈ 2.5s, `worker_threads`,
-per-exchange enable flags). CLI flags `--baseline`, `--tight`,
-`--no-bse/--no-nse`, `--ignore-market-hours`, and `--max-age-min` override it.
+**Poller CLI flags**
 
-The poller idles outside market hours (default 09:00–16:30 IST, Mon–Fri). It only
-acts on filings disseminated **today** — NSE's API returns full history, so this
-freshness gate stops it firing last quarter's results on startup. To replay a
-recent real filing in a test, widen the window with `--max-age-min N`.
+| Flag | Effect |
+|------|--------|
+| `--dry-run` | Print reports instead of sending them. |
+| `--baseline <sec>` | Override the baseline poll interval. |
+| `--tight <sec>` | Override the results-day poll interval. |
+| `--no-bse` / `--no-nse` | Disable an exchange. |
+| `--no-auto-hot` | Disable NSE board-meeting auto-detection. |
+| `--ignore-market-hours` | Poll regardless of time or day (testing). |
+| `--max-age-min <N>` | Act on filings up to `N` minutes old instead of today only. |
 
-### Tight-polling on results day (automatic)
+The poller idles outside market hours and acts only on filings disseminated
+**today** — NSE's API returns full history, so this freshness gate prevents it
+firing last quarter's results on startup. Use `--max-age-min` to replay a recent
+real filing during testing.
 
-A results filing lands in a tight window the exchange announces in advance (SEBI
-Reg 29 board-meeting intimations, filed 1–2 days ahead). The poller detects this
-itself: once on startup and once per day, it reads each stock's NSE board-meeting
-intimations, and if a meeting **to consider financial results is scheduled for
-today**, that stock is auto-flagged "hot" and polled every ~2.5s instead of the
-~10s baseline — no manual editing needed. The startup/daily log line
-`Auto-hot set for YYYYMMDD: [...]` shows which stocks are hot.
+### Module smoke tests
 
-Disable with `--no-auto-hot` (or `"auto_hot": false` in `config/poller.json`).
+Each module can be run standalone to verify a single stage of the pipeline:
 
-You can also force a stock hot for a specific day with a manual
-`expected_results_date` override in the watchlist (works even with auto-hot off):
-
-```json
-{"name": "NMDC Ltd", "scrip": "526371", "nse_symbol": "NMDC",
- "expected_results_date": "2026-07-15"}
+```bash
+python -m src.bse_client              # fetch recent BSE announcements
+python -m src.nse_client              # fetch recent NSE announcements
+python -m src.pdf_extractor <file>    # score pages and print extracted text
+python -m src.telegram_sender         # send a test message
+python -m src.ai_comparator           # run the prompt on sample data
 ```
 
-Each detection logs the dissemination timestamp and the end-to-end latency
-(disseminated → Telegram sent) so you can verify the 10–15s target.
+---
 
-## Cron (Mac / Linux)
+## How it works
 
-Runs every 10 minutes during Indian market & post-market hours, Mon–Fri:
+**Detection.** For each stock the poller fetches all announcement categories and
+applies a tight results filter that requires explicit results language, excluding
+pre-meeting intimations and trading-window notices. On results day a stock is
+additionally admitted on a bare board-meeting-outcome row, whose PDF is then
+gated by a content check that rejects non-results attachments.
+
+**Results-day cadence.** A stock is tight-polled when either its watchlist entry
+carries an `expected_results_date` matching today, or the auto-hot detector finds
+a results board meeting scheduled for today in the NSE Reg. 29 feed. The active
+hot set is logged on startup and at each daily refresh.
+
+**Deduplication.** Three layers guarantee exactly one report per company per day,
+and that a restart never re-sends:
+
+1. In-memory per-exchange row tracking (avoids re-handling a row each tick).
+2. An in-memory company claim (`name|YYYYMMDD`) under a lock — the first exchange
+   to spot a result claims the company; the other's duplicate is dropped.
+3. A persistent company marker written **only after** a successful Telegram send,
+   so it survives restarts.
+
+**Latency.** Each detection logs the dissemination timestamp and the end-to-end
+latency (disseminated → Telegram sent) so throughput can be verified.
+
+---
+
+## Deployment
+
+**Cron (one-shot mode, macOS / Linux).** Runs every 10 minutes during Indian
+market and post-market hours, Monday–Friday:
 
 ```cron
 */10 15-20 * * 1-5 cd /path/to/bse-bot && /usr/bin/python3 -m src.main >> logs/cron.log 2>&1
 ```
 
-(Adjust the Python path and the hour range to your timezone.)
+Adjust the Python path and hour range for your server's timezone.
+
+**Long-running (poll mode).** Run `python -m src.poller` under a process manager
+(`systemd`, `supervisor`, `tmux`, or Task Scheduler on Windows) so it restarts on
+failure and survives logout. The poller self-manages market hours and idles
+off-hours.
+
+---
 
 ## Troubleshooting
 
-- **403 from BSE.** The BSE JSON API rejects requests without a real
-  `User-Agent` and the `https://www.bseindia.com/` Referer header. Both are
-  already set in `src/bse_client.py`; if you swap in a new HTTP layer keep
-  them.
-- **Empty extracted text.** Some filings are scanned images, not text PDFs.
-  pdfplumber will return an empty string and the bot logs a warning and
-  skips the AI step. There is no OCR fallback by design.
-- **BSE returned non-PDF content.** BSE's `AttachLive` directory only
-  serves recent filings (roughly the last few weeks). For older filings the
-  server returns its SPA-shell HTML page instead. The bot detects this via
-  the `%PDF-` magic prefix and logs a warning. Day-of and same-week
-  filings work fine — keep the default 2-day lookback for cron.
-- **Telegram message not received.** Make sure you sent at least one
-  message to your bot (e.g. `/start`) before fetching `getUpdates` — the
-  chat id only appears after the bot has seen a message from you. If
-  `getUpdates` returns `{"ok":true,"result":[]}`, send `/start` and refresh
-  it. Also confirm the token in `.env` has no quotes or trailing spaces.
-- **Re-sending the same filing.** In one-shot mode each filing's BSE `NEWSID`
-  is stored in `data/seen_filings.json`. In poll mode the dedupe key is
-  `"<watchlist name>|YYYYMMDD"` (one report per company per day, across both
-  exchanges) and is written only after a successful Telegram send. Delete the
-  relevant entry (or the whole file) to force a re-run.
-- **NSE 401/403.** NSE gates its JSON API behind anti-bot cookies that expire
-  quickly. `src/nse_client.py` warms them via the homepage + filings page and
-  automatically re-warms on 401/403/429 with backoff. A persistent 403 usually
-  means the warm-up pages themselves were blocked — try again shortly.
-- **API costs.** The bot calls OpenAI once per new filing per stock; budget
-  for that if you grow the watchlist.
+| Symptom | Cause & resolution |
+|---------|--------------------|
+| **BSE 403** | The BSE JSON API rejects requests without a browser `User-Agent` and the `bseindia.com` `Referer`. Both are set in `src/bse_client.py`; preserve them if you swap the HTTP layer. |
+| **NSE 401 / 403** | NSE gates its JSON API behind short-lived anti-bot cookies. The client warms them via the homepage and filings page and re-warms automatically on 401/403/429. A persistent 403 usually means the warm-up pages were themselves blocked — retry shortly. |
+| **Empty extracted text** | Some filings are scanned images, not text PDFs. Extraction returns empty, a warning is logged, and the AI step is skipped. There is no OCR fallback by design. |
+| **"BSE returned non-PDF content"** | BSE's `AttachLive` directory only serves recent filings; older ones return an HTML shell. The client detects this via the `%PDF-` magic prefix. Same-week filings work fine. |
+| **Telegram message not received** | Ensure you have messaged the bot at least once (e.g. `/start`) before fetching `getUpdates` — the chat ID appears only after the bot has seen a message from you. Confirm the token in `.env` has no quotes or trailing spaces. |
+| **Re-sending the same filing** | One-shot mode keys on the BSE `NEWSID`; poll mode keys on `name\|YYYYMMDD` (written only after a successful send). Delete the relevant entry in `data/seen_filings.json` — or the whole file — to force a re-run. |
+| **API costs** | OpenAI is called once per new filing per stock. Budget accordingly as the watchlist grows. |
+
+---
+
+## Project structure
+
+```
+bse-bot/
+├── config/
+│   ├── watchlist.json      # stocks to track
+│   ├── estimates.json      # per-stock analyst estimates (optional)
+│   └── poller.json         # poller runtime settings
+├── data/
+│   ├── pdfs/               # downloaded filings (gitignored)
+│   └── seen_filings.json   # dedupe state (gitignored)
+├── logs/                   # daily run logs (gitignored)
+├── src/
+│   ├── main.py             # entry point; one-shot scan + --poll dispatch
+│   ├── poller.py           # long-running dual-exchange poller
+│   ├── bse_client.py       # BSE announcements API client
+│   ├── nse_client.py       # NSE announcements & board-meetings API client
+│   ├── pdf_extractor.py    # page scoring + structured table extraction
+│   ├── ai_comparator.py    # OpenAI comparison-report generation
+│   ├── telegram_sender.py  # Telegram Bot API delivery
+│   └── storage.py          # JSON-file persistence helpers
+├── tests/
+│   └── test_run.py         # dry-run smoke test
+├── requirements.txt
+└── .env.example
+```
+
+---
+
+## Design notes & limitations
+
+- **Single-user, personal scale.** State is stored in local JSON files; there is
+  no database, queue broker, or multi-tenant support.
+- **No OCR.** Scanned image-only filings cannot be parsed and are skipped.
+- **Text-PDF availability.** BSE serves only recent filings from `AttachLive`;
+  keep the lookback window small so cron runs hit live attachments.
+- **AI cost scales with the watchlist.** One OpenAI call is made per new filing.
+- **Auto-hot depends on NSE data.** Results-day auto-detection reads the NSE
+  board-meeting feed; BSE-only stocks require a manual `expected_results_date`.
