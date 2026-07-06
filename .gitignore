@@ -1,5 +1,7 @@
-# Environment
+# Environment / secrets
 .env
+.env.local
+.env.*.local
 .venv/
 venv/
 env/
@@ -8,21 +10,32 @@ env/
 logs/
 *.log
 
-# Local state
+# Local runtime state & downloaded filings
 data/seen_filings.json
 data/pdfs/
 data/tmp/
+*.tmp
 **/*.pdf
 
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg
 *.egg-info/
+build/
+dist/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.python-version
 
-# Editors / OS
+# Editors / IDEs / OS
 .vscode/
 .idea/
+*.swp
 .DS_Store
 Thumbs.db
+desktop.ini
