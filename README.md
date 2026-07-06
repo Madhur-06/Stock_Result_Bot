@@ -88,6 +88,7 @@ multi-second AI call on one filing cannot stall detection of the next.
 
 ```bash
 git clone https://github.com/Madhur-06/Stock_Result_Bot
+cd Stock_Result_Bot
 
 python -m venv venv
 # Windows
@@ -285,7 +286,7 @@ latency (disseminated → Telegram sent) so throughput can be verified.
 market and post-market hours, Monday–Friday:
 
 ```cron
-*/10 15-20 * * 1-5 cd /path/to/bse-bot && /usr/bin/python3 -m src.main >> logs/cron.log 2>&1
+*/10 15-20 * * 1-5 cd /path/to/Stock_Result_Bot && /usr/bin/python3 -m src.main >> logs/cron.log 2>&1
 ```
 
 Adjust the Python path and hour range for your server's timezone.
@@ -314,7 +315,7 @@ off-hours.
 ## Project structure
 
 ```
-bse-bot/
+Stock_Result_Bot/
 ├── config/
 │   ├── watchlist.json      # stocks to track
 │   ├── estimates.json      # per-stock analyst estimates (optional)
