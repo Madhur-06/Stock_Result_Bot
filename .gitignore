@@ -2,20 +2,6 @@
 .env
 .env.local
 .env.*.local
-.venv/
-venv/
-env/
-
-# Logs
-logs/
-*.log
-
-# Local runtime state & downloaded filings
-data/seen_filings.json
-data/pdfs/
-data/tmp/
-*.tmp
-**/*.pdf
 
 # Python
 __pycache__/
