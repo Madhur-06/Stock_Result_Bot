@@ -87,8 +87,7 @@ multi-second AI call on one filing cannot stall detection of the next.
 ## Installation
 
 ```bash
-git clone <repository-url>
-cd bse-bot
+git clone https://github.com/Madhur-06/Stock_Result_Bot
 
 python -m venv venv
 # Windows
