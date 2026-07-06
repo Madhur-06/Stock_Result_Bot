@@ -92,7 +92,15 @@ def _process_stock(
         try:
             pdf_path = bse_client.download_pdf(attachment, PDF_DIR)
         except Exception as exc:  # noqa: BLE001 — network can throw many things
-            logger.exception("%s: PDF download failed for %s: %s", name, attachment, exc)
+            # A 4xx (e.g. 404 for an old filing whose PDF has aged out of
+            # AttachLive) is expected — log it cleanly; only dump a stack trace
+            # for genuinely unexpected failures.
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status is not None:
+                logger.error("%s: PDF download failed for %s: HTTP %s "
+                             "(likely expired/unavailable)", name, attachment, status)
+            else:
+                logger.exception("%s: PDF download failed for %s", name, attachment)
             continue
 
         text = pdf_extractor.extract_text(pdf_path)
@@ -117,10 +125,12 @@ def _process_stock(
             continue
 
         if send_message(message):
-            send_document(pdf_path, caption=f"{name} — source filing ({pdf_path.name})")
+            doc_ok = send_document(pdf_path, caption=f"{name} — source filing ({pdf_path.name})")
             storage.mark_seen(filing_id)
             counters["reports_sent"] += 1
-            logger.info("%s: report + PDF sent and filing %s marked seen", name, filing_id)
+            logger.info("%s: report sent%s; filing %s marked seen", name,
+                        " + PDF" if doc_ok else " (PDF upload failed — text delivered)",
+                        filing_id)
         else:
             logger.error("%s: Telegram send failed for filing %s — NOT marking seen",
                          name, filing_id)
@@ -165,11 +175,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Print reports instead of sending Telegram messages")
     p.add_argument("--days-back", type=int, default=DEFAULT_DAYS_BACK,
                    help="Lookback window in days for BSE announcements")
+    p.add_argument("--poll", action="store_true",
+                   help="Run the long-running dual BSE+NSE poller instead of one sweep")
+    p.add_argument("--ignore-market-hours", action="store_true",
+                   help="(--poll only) poll regardless of time/day, for testing")
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    if args.poll:
+        # Imported lazily so the one-shot path stays free of threading deps.
+        from src import poller
+        overrides: dict[str, Any] = {}
+        if args.ignore_market_hours:
+            overrides["ignore_market_hours"] = True
+        return poller.run_forever(dry_run=args.dry_run, overrides=overrides)
     run(days_back=args.days_back, dry_run=args.dry_run)
     return 0
 

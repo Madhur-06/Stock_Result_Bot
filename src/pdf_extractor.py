@@ -107,6 +107,24 @@ def _score_page(text: str) -> tuple[int, int, int, int]:
     return pos, neg_capped, num_bonus, pos - neg_capped + num_bonus
 
 
+# Content gate: does the extracted text actually contain a P&L / results statement?
+# Used by the poller to reject non-results PDFs (e.g. a change-in-management board
+# outcome) that a HOT stock's widened candidate filter admitted on headline alone.
+_RESULTS_CONTENT_RE = re.compile(
+    r"revenue\s+from\s+operations"
+    r"|profit\s*(?:/\s*\(?loss\)?)?\s+(?:before|after|for\s+the\s+(?:period|quarter|year))"
+    r"|earnings?\s+per\s+(?:equity\s+)?share"
+    r"|statement\s+of\s+(?:standalone|consolidated|unaudited|audited)?\s*"
+    r"(?:financial\s+)?results?",
+    re.I,
+)
+
+
+def looks_like_results(text: str) -> bool:
+    """Heuristic gate: True if extracted filing text contains a results/P&L statement."""
+    return bool(text) and bool(_RESULTS_CONTENT_RE.search(text))
+
+
 # ---------- Cleaning ----------
 
 def _clean(text: str) -> str:

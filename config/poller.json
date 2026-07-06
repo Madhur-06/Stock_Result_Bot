@@ -1,0 +1,15 @@
+{
+  "timezone": "Asia/Kolkata",
+  "market_open": "09:00",
+  "market_close": "16:30",
+  "weekdays_only": true,
+  "baseline_interval_sec": 10.0,
+  "tight_interval_sec": 2.5,
+  "off_hours_check_sec": 60.0,
+  "worker_threads": 1,
+  "enable_bse": true,
+  "enable_nse": true,
+  "ignore_market_hours": false,
+  "auto_hot": true,
+  "hot_refresh_check_sec": 300.0
+}

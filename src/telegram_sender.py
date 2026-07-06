@@ -20,6 +20,9 @@ MAX_CAPTION_CHARS = 1000  # Telegram caption limit is 1024.
 MAX_DOCUMENT_BYTES = 50 * 1024 * 1024  # Telegram bot upload cap.
 RATE_LIMIT_SLEEP_SEC = 1
 REQUEST_TIMEOUT = 60
+# Document uploads can be many MB; a results PDF on a slow uplink needs more than
+# the 60s message timeout (a 10MB filing timed out at 60s in practice).
+DOCUMENT_TIMEOUT = 180
 
 
 def _chunks(text: str, size: int) -> list[str]:
@@ -94,7 +97,7 @@ def send_document(file_path: Path, caption: str = "") -> bool:
     try:
         with file_path.open("rb") as fh:
             files = {"document": (file_path.name, fh, "application/pdf")}
-            resp = requests.post(url, data=data, files=files, timeout=REQUEST_TIMEOUT)
+            resp = requests.post(url, data=data, files=files, timeout=DOCUMENT_TIMEOUT)
         body = resp.json() if resp.headers.get("Content-Type", "").startswith("application/json") else {}
         if resp.status_code == 200 and body.get("ok"):
             logger.info("Telegram document sent: %s (%d bytes)", file_path.name, size)
